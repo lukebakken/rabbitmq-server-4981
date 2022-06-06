@@ -5,66 +5,54 @@
 
 search() ->
     {ok, Items} = net_kernel:nodes_info(),
-    ok = search_items(Items).
+    {ok, Data} = search_items(Items, []),
+    ok = io:format("Data: ~p~n", [Data]),
+    ok.
 
-search_items([]) ->
-    ok;
-search_items([{Node, Item} | Rest]) ->
-    Pid = proplists:get_value(owner, Item),
-    case catch process_info(Pid, links) of
+search_items([], Acc) ->
+    {ok, Acc};
+search_items([{Node, Item} | Rest], Acc0) ->
+    OwnerPid = proplists:get_value(owner, Item),
+    Acc1 = case catch process_info(OwnerPid, links) of
         {links, Links} ->
-            {ok, Data} = search_for_ports(Links, maps:new()),
-            io:format("NODE: ~p~nDATA ~p~n", [Node, Data]);
+            {ok, Data} = search_for_ports(Node, OwnerPid, Links, maps:new()),
+            case maps:get(port, Data, not_found) of
+                not_found ->
+                    Acc0;
+                Value ->
+                    [Value | Acc0]
+            end;
         _ ->
             undefined
     end,
-    search_items(Rest).
+    search_items(Rest, Acc1).
 
-search_for_ports([], Data) ->
+search_for_ports(_Node, _OwnerPid, [], Data) ->
     {ok, Data};
-search_for_ports([Item | Rest], Data0) when is_port(Item) ->
-    Key = {port, Item},
-    Value = {{recon_port_info, recon:port_info(Item)}, {formatted_nodes_info, format_nodes_info1(Item)}},
+search_for_ports(Node, OwnerPid, [Item | _Rest], Data0) when is_port(Item) ->
+    Key = port,
+    Value = {Node, OwnerPid, format_port(Item)},
     false = maps:is_key(Key, Data0),
     Data1 = maps:put(Key, Value, Data0),
-    search_for_ports(Rest, Data1);
-search_for_ports([Item | Rest], Data0) when is_pid(Item) ->
-    Key = {pid, Item},
+    {ok, Data1};
+search_for_ports(Node, OwnerPid0, [OwnerPid | Rest], Data0) when is_pid(OwnerPid) ->
+    Key = {pid, OwnerPid},
     case maps:get(Key, Data0, not_found) of
         not_found ->
             Data1 = maps:put(Key, true, Data0),
-            case catch process_info(Item, links) of
+            case catch process_info(OwnerPid, links) of
                 {links, Links} ->
-                    search_for_ports(Links, Data1);
+                    search_for_ports(Node, OwnerPid, Links, Data1);
                 _ ->
-                    search_for_ports(Rest, Data1)
+                    search_for_ports(Node, OwnerPid0, Rest, Data1)
             end;
         true ->
-            search_for_ports(Rest, Data0)
+            search_for_ports(Node, OwnerPid0, Rest, Data0)
     end;
-search_for_ports([_Link | Rest], Data) ->
-    search_for_ports(Rest, Data).
+search_for_ports(Node, OwnerPid, [_Link | Rest], Data) ->
+    search_for_ports(Node, OwnerPid, Rest, Data).
 
-cluster_links() ->
-    {ok, Items} = net_kernel:nodes_info(),
-    [Link || Item <- Items,
-             Link <- [format_nodes_info(Item)], Link =/= undefined].
-
-format_nodes_info({Node, Info}) ->
-    Pid = proplists:get_value(owner, Info),
-    case catch process_info(Pid, links) of
-        {links, Links} ->
-            case [Link || Link <- Links, is_port(Link)] of
-                [Port] ->
-                    {Node, Pid, format_nodes_info1(Port)};
-                _ ->
-                    undefined
-            end;
-        _ ->
-            undefined
-    end.
-
-format_nodes_info1(Port) ->
+format_port(Port) ->
     case {rabbit_net:socket_ends(Port, inbound),
           rabbit_net:getstat(Port, [recv_oct, send_oct])} of
         {{ok, {PeerAddr, PeerPort, SockAddr, SockPort}}, {ok, Stats}} ->
